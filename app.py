@@ -1,0 +1,522 @@
+#!/usr/bin/env python3
+"""Fenêtre macOS pour les verrous temporels.
+
+AppKit directement, sans rumps : la barre de menu seule obligeait à des alertes
+modales qui s'ouvraient derrière les autres fenêtres, et chaque état de l'app
+passait par une boîte de dialogue qu'il fallait aller chercher.
+
+Le compte à rebours reste aussi dans la barre de menu : pendant les huit
+secondes, la fenêtre est justement au second plan puisqu'on clique dans les
+Réglages Système.
+"""
+
+import sys
+import webbrowser
+from datetime import datetime
+from pathlib import Path
+
+import objc
+from AppKit import (
+    NSApplication,
+    NSApplicationActivationPolicyRegular,
+    NSBackingStoreBuffered,
+    NSBezelStyleRounded,
+    NSBox,
+    NSBoxSeparator,
+    NSButton,
+    NSColor,
+    NSFont,
+    NSImage,
+    NSMakeRect,
+    NSMakeSize,
+    NSMenu,
+    NSMenuItem,
+    NSPopUpButton,
+    NSStatusBar,
+    NSTextField,
+    NSTextAlignmentCenter,
+    NSVariableStatusItemLength,
+    NSWindow,
+    NSWindowStyleMaskClosable,
+    NSWindowStyleMaskMiniaturizable,
+    NSWindowStyleMaskTitled,
+)
+from Foundation import NSObject, NSTimer
+from PyObjCTools import AppHelper
+
+import client
+import typer
+
+DURATIONS = [
+    ("1 minute (test)", 1),
+    ("1 heure", 60),
+    ("1 jour", 1440),
+    ("3 jours", 4320),
+    ("7 jours", 10080),
+    ("30 jours", 43200),
+]
+COUNTDOWN = 8
+PAYMENT_TIMEOUT = 600
+REFRESH_EVERY = 30
+LOGO = Path(__file__).parent / "assets" / "temps-decran-logo.png"
+
+W, H = 460, 330
+MARGIN = 24
+HEAD_Y = H - 70  # centre vertical du titre, fixe : sizeToFit fait varier sa hauteur, pas sa position
+SUB_TOP = H - 120
+SEP_Y = SUB_TOP - 45
+BODY_TOP = SEP_Y - 15
+BODY_H = 60
+ROW1_Y = 80  # centre vertical de la ligne sélecteur + action principale
+ROW2_Y = 40  # centre vertical de l'action secondaire, en retrait sous la première
+
+
+def format_remaining(seconds: int) -> str:
+    days, rem = divmod(seconds, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, secs = divmod(rem, 60)
+    if days:
+        return f"{days}j {hours}h"
+    if hours:
+        return f"{hours}h {minutes}min"
+    if minutes:
+        return f"{minutes}min"
+    return f"{secs}s"
+
+
+def label(frame, size, *, bold=False, grey=False, color=None) -> NSTextField:
+    field = NSTextField.alloc().initWithFrame_(frame)
+    field.setEditable_(False)
+    field.setBezeled_(False)
+    field.setDrawsBackground_(False)
+    field.setAlignment_(NSTextAlignmentCenter)
+    field.setFont_(
+        NSFont.boldSystemFontOfSize_(size) if bold else NSFont.systemFontOfSize_(size)
+    )
+    if color is not None:
+        field.setTextColor_(color)
+    elif grey:
+        field.setTextColor_(NSColor.secondaryLabelColor())
+    return field
+
+
+class App(NSObject):
+    def init(self):
+        self = objc.super(App, self).init()
+        self.lock = None
+        self.offline = False
+        self.mode = "idle"  # idle | countdown | confirm | code | paying
+        self.notice = ""
+        self.shown_code = None
+        self.pending_kind = None  # "lock" ou "test"
+        self.remaining_ticks = 0
+        self.awaiting_payment = None
+        self.payment_ticks = 0
+        self.ticks = 0
+        return self
+
+    # --- construction ---
+
+    @objc.python_method
+    def build(self) -> None:
+        self.window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
+            NSMakeRect(0, 0, W, H),
+            NSWindowStyleMaskTitled
+            | NSWindowStyleMaskClosable
+            | NSWindowStyleMaskMiniaturizable,
+            NSBackingStoreBuffered,
+            False,
+        )
+        self.window.setTitle_("Temps d'écran")
+        self.window.center()
+        self.window.setDelegate_(self)
+        view = self.window.contentView()
+
+        # Frame de départ arbitraire : render() recalcule taille et position
+        # de chaque champ à chaque affichage (sizeToFit), donc seule la
+        # largeur totale ici sert de point de départ.
+        self.head = label(NSMakeRect(0, HEAD_Y, W, 40), 30, bold=True)
+        self.sub = label(NSMakeRect(MARGIN, SUB_TOP - 18, W - 2 * MARGIN, 18), 13, grey=True)
+        self.body = label(NSMakeRect(MARGIN, BODY_TOP - BODY_H, W - 2 * MARGIN, BODY_H), 15)
+        self.body.setSelectable_(True)
+        for f in (self.head, self.sub, self.body):
+            view.addSubview_(f)
+
+        # Séparateur : structure la fenêtre en deux zones (titre / contenu),
+        # via NSBox pour rester correct en thème clair comme sombre.
+        self.separator = NSBox.alloc().initWithFrame_(
+            NSMakeRect(MARGIN, SEP_Y, W - 2 * MARGIN, 1)
+        )
+        self.separator.setBoxType_(NSBoxSeparator)
+        view.addSubview_(self.separator)
+
+        self.picker = NSPopUpButton.alloc().initWithFrame_pullsDown_(
+            NSMakeRect(0, 0, 170, 26), False
+        )
+        self.picker.addItemsWithTitles_([d[0] for d in DURATIONS])
+        self.picker.selectItemAtIndex_(1)
+        self.picker.sizeToFit()  # fixe sa hauteur naturelle une fois pour toutes
+        picker_frame = self.picker.frame()
+        self.picker.setFrame_(NSMakeRect(0, 0, 170, picker_frame.size.height))
+        view.addSubview_(self.picker)
+
+        self.primary = self.make_button(NSMakeRect(0, 0, 100, 30), b"primary:")
+        self.primary.setKeyEquivalent_("\r")
+        self.secondary = self.make_button(NSMakeRect(0, 0, 100, 30), b"secondary:")
+        for b in (self.primary, self.secondary):
+            view.addSubview_(b)
+
+        self.status = NSStatusBar.systemStatusBar().statusItemWithLength_(
+            NSVariableStatusItemLength
+        )
+        self.status_icon = NSImage.alloc().initWithContentsOfFile_(str(LOGO))
+        self.status_icon.setSize_(NSMakeSize(18, 18))
+        self.status_icon.setTemplate_(False)
+        self.status.button().setImage_(self.status_icon)
+        menu = NSMenu.alloc().init()
+        for title, sel in (("Ouvrir la fenêtre", b"show:"), ("Quitter", b"terminate:")):
+            item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(title, sel, "")
+            item.setTarget_(self if sel != b"terminate:" else NSApplication.sharedApplication())
+            menu.addItem_(item)
+        self.status.setMenu_(menu)
+
+    @objc.python_method
+    def make_button(self, frame, selector):
+        b = NSButton.alloc().initWithFrame_(frame)
+        b.setBezelStyle_(NSBezelStyleRounded)
+        b.setTarget_(self)
+        b.setAction_(selector)
+        return b
+
+    # --- rendu ---
+
+    @objc.python_method
+    def render(self) -> None:
+        head, sub, body = "", "", self.notice
+        picker = primary = secondary = None
+        status = "Prêt"
+
+        if self.mode == "countdown":
+            ticks = max(self.remaining_ticks, 0)
+            # Surtout pas le code : l'afficher huit secondes en gros suffirait
+            # à le mémoriser, et l'app ne verrouillerait plus rien.
+            head = str(ticks)
+            sub = "Place le curseur dans le champ, la frappe démarre."
+            secondary = "Annuler"
+            status = f"Saisie dans {ticks}s"
+        elif self.mode == "confirm":
+            head = "Vérifie"
+            body = "Le code a-t-il bien été saisi deux fois ?"
+            primary, secondary = "Oui", "Non, montre-le-moi"
+            status = "Saisie"
+        elif self.mode == "code":
+            head = self.shown_code
+            sub = "Note-le si tu en as besoin — il ne sera plus affiché."
+            primary = "Je l'ai noté"
+            status = "Code affiché"
+        elif self.mode == "paying":
+            head = "Paiement"
+            sub = "Paiement en cours dans le navigateur."
+            body = "Le code s'affichera ici dès que Stripe aura confirmé."
+            secondary = "Arrêter d'attendre"
+            status = "Paiement…"
+        elif self.offline:
+            head = "Hors ligne"
+            sub = f"Serveur injoignable ({client.server_url()})"
+            primary = "Réessayer"
+            status = "Hors ligne"
+        elif self.lock is None:
+            head = "Aucun verrou"
+            sub = "Choisis une durée : le code sera tapé, puis oublié."
+            picker, primary = True, "Créer le verrou"
+            if client.last_lock_id():
+                secondary = "Revoir le dernier code"
+        else:
+            expired = self.lock["expired"]
+            head = "Prêt" if expired else format_remaining(self.lock["remaining_seconds"])
+            unlock = datetime.fromisoformat(self.lock["unlock_at"]).astimezone()
+            sub = (
+                "Le verrou est échu, le code est à toi."
+                if expired
+                else f"Disponible le {unlock.strftime('%a %d %b à %H:%M')}"
+            )
+            primary = "Récupérer le code" if expired else "Révéler maintenant — 5 €"
+            status = "Prêt" if expired else format_remaining(self.lock["remaining_seconds"])
+
+        self.head.setStringValue_(head or "")
+        if self.mode in ("countdown", "code"):
+            self.head.setFont_(NSFont.monospacedDigitSystemFontOfSize_weight_(64, 0.3))
+        elif self.mode == "paying":
+            self.head.setFont_(NSFont.systemFontOfSize_(48))
+        else:
+            self.head.setFont_(NSFont.boldSystemFontOfSize_(30))
+
+        # Accent réservé aux deux états qui doivent se reconnaître sans lire
+        # le texte : verrou actif en cours, et serveur injoignable.
+        if self.offline:
+            accent = NSColor.systemRedColor()
+        elif self.mode == "idle" and self.lock is not None and not self.lock["expired"]:
+            accent = NSColor.controlAccentColor()
+        else:
+            accent = NSColor.labelColor()
+        self.head.setTextColor_(accent)
+        self.place_hero(self.head)
+
+        self.sub.setStringValue_(sub)
+        self.body.setStringValue_(body)
+
+        self.picker.setHidden_(not picker)
+        for widget, title in ((self.primary, primary), (self.secondary, secondary)):
+            widget.setHidden_(title is None)
+            if title is not None:
+                widget.setTitle_(title)
+                widget.sizeToFit()
+        self.place_row((self.picker, self.primary), ROW1_Y)
+        self.place_row((self.secondary,), ROW2_Y)
+
+        self.status.button().setTitle_(status)
+
+    @objc.python_method
+    def place_hero(self, field) -> None:
+        """Centre le titre sur une position verticale fixe : sizeToFit fait
+        varier sa hauteur selon la police (30pt vs 64pt) sans jamais le
+        rogner ni faire sauter sa ligne de base d'un état à l'autre."""
+        field.sizeToFit()
+        fr = field.frame()
+        field.setFrame_(NSMakeRect((W - fr.size.width) / 2, HEAD_Y - fr.size.height / 2, fr.size.width, fr.size.height))
+
+    @objc.python_method
+    def place_row(self, widgets, center_y) -> None:
+        """Centre en groupe les widgets visibles d'une ligne d'action : leur
+        nombre et leur largeur (liée au libellé) changent selon l'état, donc
+        aucune position fixe ne conviendrait à tous."""
+        visible = [w for w in widgets if not w.isHidden()]
+        if not visible:
+            return
+        gap = 12
+        total = sum(w.frame().size.width for w in visible) + gap * (len(visible) - 1)
+        x = (W - total) / 2
+        for w in visible:
+            fr = w.frame()
+            w.setFrameOrigin_((x, center_y - fr.size.height / 2))
+            x += fr.size.width + gap
+
+    # --- réseau ---
+
+    @objc.python_method
+    def refresh(self) -> None:
+        try:
+            self.lock = client.current_lock()
+            self.offline = False
+        except client.ServerUnreachable:
+            self.offline = True
+        except client.ApiError as e:
+            self.offline = True
+            self.notice = f"Erreur serveur : {e.detail}"
+
+    # --- actions ---
+
+    def primary_(self, sender) -> None:
+        self.guard(self._primary)
+
+    def secondary_(self, sender) -> None:
+        self.guard(self._secondary)
+
+    @objc.python_method
+    def guard(self, fn) -> None:
+        try:
+            fn()
+        except Exception as e:
+            self.notice = f"{type(e).__name__} : {e}"
+        self.render()
+
+    @objc.python_method
+    def _primary(self) -> None:
+        if self.mode == "confirm":
+            self.shown_code = None
+            self.mode = "idle"
+            self.refresh()
+        elif self.mode == "code":
+            self.shown_code = None
+            self.mode = "idle"
+            self.refresh()
+        elif self.offline:
+            self.notice = ""
+            self.refresh()
+        elif self.lock is None:
+            self.create_lock()
+        else:
+            self.reveal(self.lock["lock_id"])
+
+    @objc.python_method
+    def _secondary(self) -> None:
+        if self.mode == "countdown":
+            self.mode = "code" if self.shown_code else "idle"
+            self.pending_kind = None
+            self.notice = "Frappe annulée." if not self.shown_code else ""
+        elif self.mode == "confirm":
+            self.mode = "code"
+        elif self.mode == "paying":
+            self.awaiting_payment = None
+            self.mode = "idle"
+            self.refresh()
+        else:
+            last = client.last_lock_id()
+            if last:
+                self.reveal(last)
+
+    @objc.python_method
+    def create_lock(self) -> None:
+        minutes = DURATIONS[self.picker.indexOfSelectedItem()][1]
+        try:
+            result = client.create_lock(minutes)
+        except client.ServerUnreachable:
+            self.offline = True
+            return
+        except client.ApiError as e:
+            self.notice = str(e.detail)
+            return
+
+        self.notice = ""
+        self.shown_code = result["code"]
+        self.start_countdown("lock")
+
+    @objc.python_method
+    def reveal(self, lock_id: str) -> None:
+        try:
+            self.shown_code = client.reveal(lock_id)["code"]
+            self.mode = "code"
+            self.notice = ""
+        except client.ServerUnreachable:
+            self.offline = True
+        except client.ApiError as e:
+            if e.status == 402:
+                self.start_payment(lock_id)
+            else:
+                self.notice = str(e.detail)
+
+    # --- paiement ---
+
+    @objc.python_method
+    def start_payment(self, lock_id: str) -> None:
+        try:
+            url = client.checkout(lock_id)["checkout_url"]
+        except client.ServerUnreachable:
+            self.offline = True
+            return
+        except client.ApiError as e:
+            self.notice = f"Paiement impossible : {e.detail}"
+            return
+
+        webbrowser.open(url)
+        self.awaiting_payment = lock_id
+        self.payment_ticks = 0
+        self.notice = ""
+        self.mode = "paying"
+
+    @objc.python_method
+    def poll_payment(self) -> None:
+        """Le webhook arrive sur le serveur, pas ici : on interroge le verrou
+        jusqu'à ce que Stripe l'ait marqué payé."""
+        self.payment_ticks += 1
+        if self.payment_ticks > PAYMENT_TIMEOUT:
+            self.awaiting_payment = None
+            self.mode = "idle"
+            self.notice = (
+                "Paiement non détecté. Si tu as bien payé, "
+                "clique à nouveau sur Révéler : ce sera sans repayer."
+            )
+            self.refresh()
+            return
+        if self.payment_ticks % 2:
+            return
+        try:
+            if not client.lock_status(self.awaiting_payment)["paid"]:
+                return
+        except (client.ServerUnreachable, client.ApiError):
+            return  # transitoire, on réessaiera
+
+        lock_id, self.awaiting_payment = self.awaiting_payment, None
+        self.mode = "idle"
+        self.reveal(lock_id)
+
+    # --- compte à rebours ---
+
+    @objc.python_method
+    def start_countdown(self, kind: str) -> None:
+        self.pending_kind = kind
+        self.remaining_ticks = COUNTDOWN
+        self.mode = "countdown"
+        self.window.makeKeyAndOrderFront_(None)
+
+    @objc.python_method
+    def fire_typing(self) -> None:
+        kind, self.pending_kind = self.pending_kind, None
+        try:
+            typer.type_code(self.shown_code if kind == "lock" else "1234")
+        except Exception as e:
+            self.notice = str(e)
+            self.mode = "code" if kind == "lock" else "idle"
+            return
+
+        if kind == "lock":
+            self.mode = "confirm"
+        else:
+            self.mode = "idle"
+            self.shown_code = None
+            self.notice = "Frappe de test terminée."
+            self.refresh()
+
+    def tick_(self, timer) -> None:
+        self.ticks += 1
+        if self.mode == "countdown":
+            self.remaining_ticks -= 1
+            if self.remaining_ticks <= 0:
+                self.guard(self.fire_typing)
+                return
+        elif self.mode == "paying":
+            self.guard(self.poll_payment)
+            return
+        elif self.mode == "idle" and self.ticks % REFRESH_EVERY == 0:
+            self.refresh()
+        self.render()
+
+    # --- cycle de vie ---
+
+    def show_(self, sender) -> None:
+        NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+        self.window.makeKeyAndOrderFront_(None)
+
+    def windowShouldClose_(self, sender) -> bool:
+        # La fenêtre se referme, l'app continue : le décompte doit rester
+        # visible dans la barre de menu même sans fenêtre à l'écran.
+        self.window.orderOut_(None)
+        return False
+
+    def applicationShouldHandleReopen_hasVisibleWindows_(self, app, visible) -> bool:
+        self.window.makeKeyAndOrderFront_(None)
+        return True
+
+    def applicationDidFinishLaunching_(self, notification) -> None:
+        self.build()
+        self.refresh()
+        self.render()
+        self.window.makeKeyAndOrderFront_(None)
+        NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+        NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+            1.0, self, b"tick:", None, True
+        )
+
+
+def main() -> None:
+    app = NSApplication.sharedApplication()
+    # Regular et non Accessory : c'est ce qui donne une icône dans le Dock et
+    # une fenêtre qui passe au premier plan quand on la demande.
+    app.setActivationPolicy_(NSApplicationActivationPolicyRegular)
+    delegate = App.alloc().init()
+    app.setDelegate_(delegate)
+    AppHelper.runEventLoop()
+
+
+if __name__ == "__main__":
+    main()
