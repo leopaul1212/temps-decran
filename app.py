@@ -32,6 +32,7 @@ from AppKit import (
     NSMenu,
     NSMenuItem,
     NSPopUpButton,
+    NSSlider,
     NSStatusBar,
     NSTextField,
     NSTextAlignmentCenter,
@@ -60,7 +61,11 @@ PAYMENT_TIMEOUT = 600
 REFRESH_EVERY = 30
 LOGO = Path(__file__).parent / "assets" / "temps-decran-logo.png"
 
-W, H = 460, 330
+# Hauteur portée de 330 à 410 pour loger le curseur de prix : HEAD_Y, SUB_TOP,
+# SEP_Y et BODY_TOP se déduisent de H alors que ROW1_Y/ROW2_Y se comptent
+# depuis le bas, si bien qu'agrandir la fenêtre ouvre une bande entre le bas du
+# corps et la première rangée d'actions — sans déplacer quoi que ce soit.
+W, H = 460, 410
 MARGIN = 24
 HEAD_Y = H - 70  # centre vertical du titre, fixe : sizeToFit fait varier sa hauteur, pas sa position
 SUB_TOP = H - 120
@@ -69,6 +74,36 @@ BODY_TOP = SEP_Y - 15
 BODY_H = 60
 ROW1_Y = 80  # centre vertical de la ligne sélecteur + action principale
 ROW2_Y = 40  # centre vertical de l'action secondaire, en retrait sous la première
+# Bande du curseur de prix, entre le bas du corps et ROW1. Les bornes tiennent
+# sur la même ligne que le montant plutôt que sous le rail : posées en dessous,
+# elles venaient buter contre la rangée de boutons.
+AMOUNT_ROW_Y = 142
+AMOUNT_SLIDER_Y = 116
+AMOUNT_SLIDER_W = 280
+
+AMOUNT_MIN, AMOUNT_MAX, AMOUNT_DEFAULT = 1, 300, 10
+# Exposant de l'échelle du curseur. Voir amount_from_slider.
+AMOUNT_CURVE = 2.2
+
+
+def amount_from_slider(t: float) -> int:
+    """Position du curseur (0 → 1) vers un prix en euros.
+
+    L'échelle est volontairement non linéaire : 300 € étalés uniformément sur
+    280 px mettraient 1,07 € par pixel, et la zone 1–20 € — celle où se
+    placeront la plupart des choix — tiendrait sur dix-huit pixels. Avec cette
+    courbe, la moitié basse de la course couvre 1–66 €.
+    """
+    euros = AMOUNT_MIN + (AMOUNT_MAX - AMOUNT_MIN) * t ** AMOUNT_CURVE
+    # Au-delà de 50 €, arrondi à 5 € : à cet endroit de la course un pixel
+    # vaut plus d'un euro, et personne ne cherche à se fixer 287 €.
+    step = 5 if euros > 50 else 1
+    return max(AMOUNT_MIN, min(AMOUNT_MAX, int(round(euros / step)) * step))
+
+
+def slider_from_amount(euros: int) -> float:
+    """Réciproque de amount_from_slider, pour poser la position de départ."""
+    return ((euros - AMOUNT_MIN) / (AMOUNT_MAX - AMOUNT_MIN)) ** (1 / AMOUNT_CURVE)
 
 
 def format_remaining(seconds: int) -> str:
@@ -160,6 +195,36 @@ class App(NSObject):
         self.picker.setFrame_(NSMakeRect(0, 0, 170, picker_frame.size.height))
         view.addSubview_(self.picker)
 
+        # Le prix de la rechute, fixé à froid au moment de poser le verrou.
+        self.amount_label = label(
+            NSMakeRect(MARGIN, AMOUNT_ROW_Y, W - 2 * MARGIN, 20), 15, bold=True
+        )
+        slider_x = (W - AMOUNT_SLIDER_W) / 2
+        self.amount_slider = NSSlider.alloc().initWithFrame_(
+            NSMakeRect(slider_x, AMOUNT_SLIDER_Y, AMOUNT_SLIDER_W, 20)
+        )
+        # Le curseur travaille sur 0 → 1, pas sur des euros : c'est
+        # amount_from_slider qui porte l'échelle.
+        self.amount_slider.setMinValue_(0.0)
+        self.amount_slider.setMaxValue_(1.0)
+        self.amount_slider.setDoubleValue_(slider_from_amount(AMOUNT_DEFAULT))
+        self.amount_slider.setTarget_(self)
+        self.amount_slider.setAction_(b"amountChanged:")
+        self.amount_min = label(NSMakeRect(slider_x - 30, AMOUNT_ROW_Y + 2, 60, 15), 11, grey=True)
+        self.amount_min.setStringValue_(f"{AMOUNT_MIN} €")
+        self.amount_max = label(
+            NSMakeRect(slider_x + AMOUNT_SLIDER_W - 30, AMOUNT_ROW_Y + 2, 60, 15), 11, grey=True
+        )
+        self.amount_max.setStringValue_(f"{AMOUNT_MAX} €")
+        self.amount_views = (
+            self.amount_label,
+            self.amount_slider,
+            self.amount_min,
+            self.amount_max,
+        )
+        for w in self.amount_views:
+            view.addSubview_(w)
+
         self.primary = self.make_button(NSMakeRect(0, 0, 100, 30), b"primary:")
         self.primary.setKeyEquivalent_("\r")
         self.secondary = self.make_button(NSMakeRect(0, 0, 100, 30), b"secondary:")
@@ -193,7 +258,7 @@ class App(NSObject):
     @objc.python_method
     def render(self) -> None:
         head, sub, body = "", "", self.notice
-        picker = primary = secondary = None
+        picker = amount = primary = secondary = None
         status = "Prêt"
 
         if self.mode == "countdown":
@@ -227,8 +292,8 @@ class App(NSObject):
             status = "Hors ligne"
         elif self.lock is None:
             head = "Aucun verrou"
-            sub = "Choisis une durée : le code sera tapé, puis oublié."
-            picker, primary = True, "Créer le verrou"
+            sub = "Choisis une durée, et ce que craquer avant te coûtera."
+            picker, amount, primary = True, True, "Créer le verrou"
             if client.last_lock_id():
                 secondary = "Revoir le dernier code"
         else:
@@ -240,7 +305,13 @@ class App(NSObject):
                 if expired
                 else f"Disponible le {unlock.strftime('%a %d %b à %H:%M')}"
             )
-            primary = "Récupérer le code" if expired else "Révéler maintenant — 5 €"
+            # .get et non [] : une app mise à jour avant le serveur recevrait
+            # un verrou sans « price_cents ». render() tourne dans le timer,
+            # une KeyError ici rendrait la fenêtre inutilisable à chaque tick.
+            price = self.lock.get("price_cents", AMOUNT_DEFAULT * 100) // 100
+            primary = (
+                "Récupérer le code" if expired else f"Révéler maintenant — {price} €"
+            )
             status = "Prêt" if expired else format_remaining(self.lock["remaining_seconds"])
 
         self.head.setStringValue_(head or "")
@@ -266,6 +337,9 @@ class App(NSObject):
         self.body.setStringValue_(body)
 
         self.picker.setHidden_(not picker)
+        self.amount_label.setStringValue_(f"Craquer : {self.chosen_amount()} €")
+        for w in self.amount_views:
+            w.setHidden_(not amount)
         for widget, title in ((self.primary, primary), (self.secondary, secondary)):
             widget.setHidden_(title is None)
             if title is not None:
@@ -315,6 +389,15 @@ class App(NSObject):
             self.notice = f"Erreur serveur : {e.detail}"
 
     # --- actions ---
+
+    def amountChanged_(self, sender) -> None:
+        # Purement local : rien ne part au serveur tant que le verrou n'est pas
+        # posé. render() relit le curseur et rafraîchit le libellé.
+        self.render()
+
+    @objc.python_method
+    def chosen_amount(self) -> int:
+        return amount_from_slider(self.amount_slider.doubleValue())
 
     def primary_(self, sender) -> None:
         self.guard(self._primary)
@@ -369,7 +452,7 @@ class App(NSObject):
     def create_lock(self) -> None:
         minutes = DURATIONS[self.picker.indexOfSelectedItem()][1]
         try:
-            result = client.create_lock(minutes)
+            result = client.create_lock(minutes, self.chosen_amount() * 100)
         except client.ServerUnreachable:
             self.offline = True
             return

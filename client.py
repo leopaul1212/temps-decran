@@ -107,8 +107,8 @@ def _request(method: str, path: str, body: dict | None = None, timeout: int = 8)
         raise ServerUnreachable(str(e))
 
 
-def create_lock(minutes: int) -> dict:
-    return _request("POST", "/locks", {"minutes": minutes})
+def create_lock(minutes: int, amount_cents: int) -> dict:
+    return _request("POST", "/locks", {"minutes": minutes, "amount_cents": amount_cents})
 
 
 def current_lock() -> dict | None:
