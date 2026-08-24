@@ -2,7 +2,8 @@
 
 Verrou temporel pour le code Temps d'écran de macOS. Le code est généré par le
 serveur, tapé une fois dans le champ système, puis oublié par la machine. Le
-récupérer avant l'échéance coûte 5 €.
+récupérer avant l'échéance coûte le prix que tu t'es fixé en le posant, de
+1 à 300 €.
 
 Le client ne détient rien : ni le code, ni de quoi le recalculer. Avancer
 l'horloge de la machine ne change rien, c'est le serveur qui arbitre.
@@ -41,12 +42,15 @@ curl -fsSL https://raw.githubusercontent.com/leopaul1212/temps-decran/main/insta
 
 ## Comment ça marche
 
-1. **Tu poses un verrou.** Tu choisis une durée ; le serveur tire un code, l'app
-   le tape dans le champ système, puis l'oublie.
+1. **Tu poses un verrou.** Tu choisis une durée — et ce que craquer avant te
+   coûtera, de 1 à 300 €. Le serveur tire un code, l'app le tape dans le champ
+   système, puis l'oublie. Le prix se décide là, à froid : le choisir au moment
+   où l'on veut déjà le code, ce serait choisir combien on accepte de se punir
+   en pleine envie de céder.
 2. **Le décompte court.** Tant qu'il tourne, le code reste au serveur. La
    machine ne peut ni le lire ni le recalculer.
 3. **L'échéance arrive.** Le code se révèle tout seul, gratuitement. Pressé ?
-   5 € le libèrent avant l'heure.
+   Le prix que tu t'étais fixé le libère avant l'heure.
 
 ## Développer
 

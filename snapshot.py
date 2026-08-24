@@ -23,8 +23,8 @@ OUT = Path(sys.argv[1] if len(sys.argv) > 1 else "shots")
 FUTURE = "2026-08-30T18:30:00+00:00"
 STATES = {
     "idle": dict(lock=None),
-    "locked": dict(lock={"lock_id": "abc", "unlock_at": FUTURE, "remaining_seconds": 22530, "expired": False, "paid": False}),
-    "ready": dict(lock={"lock_id": "abc", "unlock_at": FUTURE, "remaining_seconds": 0, "expired": True, "paid": False}),
+    "locked": dict(lock={"lock_id": "abc", "unlock_at": FUTURE, "remaining_seconds": 22530, "expired": False, "paid": False, "price_cents": 1700}),
+    "ready": dict(lock={"lock_id": "abc", "unlock_at": FUTURE, "remaining_seconds": 0, "expired": True, "paid": False, "price_cents": 1700}),
     "countdown": dict(mode="countdown", remaining_ticks=5, shown_code="2115"),
     "confirm": dict(mode="confirm", shown_code="2115"),
     "code": dict(mode="code", shown_code="2115"),
