@@ -306,7 +306,7 @@ class App(NSObject):
             sub = "Autorise l'app à saisir le code à ta place."
             body = (
                 "Réglages Système → Confidentialité et sécurité → "
-                "Accessibilité, puis active « Temps d'écran »."
+                "Accessibilité, active « Temps d'écran », puis relance l'app."
             )
             primary = "Ouvrir les réglages"
             status = "Accessibilité requise"
@@ -456,9 +456,11 @@ class App(NSObject):
     @objc.python_method
     def request_accessibility(self) -> None:
         # L'invite système (une fois par lancement) plus l'ouverture directe du
-        # volet, pour l'utilisateur qui l'a déjà fermée. Le rendu tourne chaque
-        # seconde en veille : dès la permission accordée, l'écran de création
-        # revient tout seul, sans relancer l'app.
+        # volet, pour l'utilisateur qui l'a déjà fermée. Le rendu re-teste la
+        # permission chaque seconde et débloque l'écran dès que le système la
+        # voit accordée. Mais ce build est signé ad-hoc : un process déjà lancé
+        # ne réévalue pas toujours sa confiance à chaud, d'où la consigne de
+        # relancer l'app portée par l'écran « Accessibilité requise ».
         typer.prompt_accessibility()
         url = NSURL.URLWithString_(ACCESSIBILITY_PANE)
         NSWorkspace.sharedWorkspace().openURL_(url)
