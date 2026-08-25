@@ -53,23 +53,11 @@ TEMPS_DECRAN_SERVER="$SERVER" build .venv-build/bin/python setup.py py2app
 
 [ -d "dist/$APP_NAME" ] || die "La construction n'a pas produit dist/$APP_NAME (journal : $log)."
 
-# py2app baptise l'exécutable d'après CFBundleName (« Temps d'écran ») :
-# codesign ne sait pas sceller un bundle dont l'exécutable porte une apostrophe
-# et un accent (bug de comparaison d'octets sur le nom). Le bundle restait donc
-# non signé, et TCC refusait la permission Accessibilité — case cochée, mais app
-# jamais fiée, la frappe ne partait nulle part. On renomme l'exécutable en ASCII
-# (le nom affiché reste « Temps d'écran » via CFBundleName/CFBundleDisplayName),
-# puis on scelle le bundle par une signature ad-hoc valide. Le dossier .app,
-# lui, peut garder l'accent : seul le fichier exécutable devait changer.
-built="dist/$APP_NAME"
-plist="$built/Contents/Info.plist"
-exe="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$plist")"
-if [ "$exe" != "temps-decran" ]; then
-  mv "$built/Contents/MacOS/$exe" "$built/Contents/MacOS/temps-decran"
-  /usr/libexec/PlistBuddy -c 'Set :CFBundleExecutable temps-decran' "$plist"
-fi
-build codesign --force --deep --sign - "$built"
-build codesign --verify "$built"
+# Le bundle sort déjà signé : setup.py étend la commande py2app pour renommer
+# l'exécutable en ASCII (sans quoi codesign ne scelle pas un nom accentué, et
+# TCC refuse l'Accessibilité) puis apposer une signature ad-hoc valide. Rien à
+# faire de plus ici que de vérifier le résultat.
+build codesign --verify "dist/$APP_NAME"
 
 dest="$HOME/Applications"
 mkdir -p "$dest"
