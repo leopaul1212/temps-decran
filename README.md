@@ -88,11 +88,22 @@ TEMPS_DECRAN_SERVER=https://screentime.mahwai.app .venv-build/bin/python setup.p
 
 Le serveur cible est **gravé au build** : `setup.py` échoue plutôt que de livrer
 une app qui mourrait « serveur injoignable » au premier lancement. Le résultat
-est `dist/Temps d'écran.app`, signé ad-hoc et **non notarisé** — un `.app`
-distribué (plutôt que compilé sur place) déclenche donc Gatekeeper au premier
-lancement : Réglages Système → Confidentialité et sécurité → « Ouvrir quand
-même ». Un compte Apple Developer (99 €/an) et une notarisation feraient
-disparaître cette friction.
+est `dist/Temps d'écran.app`.
+
+`setup.py` étend la commande py2app pour, après le build, **renommer
+l'exécutable en `temps-decran` (ASCII)** puis **sceller le bundle par une
+signature ad-hoc valide** : codesign ne sait pas signer un exécutable dont le
+nom porte apostrophe et accent, et sans sceau valide macOS refuse la permission
+Accessibilité (case cochée mais jamais effective). Le nom affiché reste « Temps
+d'écran » via `CFBundleName` / `CFBundleDisplayName`. Aucune étape manuelle à
+ajouter : tout build passe par là.
+
+La signature reste **ad-hoc et non notarisée** — un `.app` distribué (plutôt que
+compilé sur place) déclenche donc Gatekeeper au premier lancement : Réglages
+Système → Confidentialité et sécurité → « Ouvrir quand même ». Étant ad-hoc,
+l'empreinte change à chaque build : la permission Accessibilité est à
+re-accorder après chaque mise à jour. Un compte Apple Developer (99 €/an) avec
+signature stable et notarisation ferait disparaître ces deux frictions.
 
 Pour repointer un `.app` déjà installé sans le recompiler :
 
