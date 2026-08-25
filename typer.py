@@ -30,10 +30,23 @@ TYPE_INTERVAL = 0.1
 KEYCODE_TAB = 0x30
 
 
+def has_accessibility() -> bool:
+    """Permission accordée ? Lecture pure, sans invite : appelable en boucle
+    dans le rendu pour débloquer l'interface dès que l'utilisateur l'accorde."""
+    return bool(AXIsProcessTrustedWithOptions({kAXTrustedCheckOptionPrompt: False}))
+
+
+def prompt_accessibility() -> bool:
+    """Déclenche l'invite système « Ouvrir les Réglages Système ». macOS ne la
+    montre qu'une fois par lancement ; ensuite c'est au réglage d'être ouvert
+    à la main."""
+    return bool(AXIsProcessTrustedWithOptions({kAXTrustedCheckOptionPrompt: True}))
+
+
 def require_accessibility() -> None:
     """Sans cette permission, les événements postés ne vont nulle part : aucune
     frappe, aucune exception, code perdu. On échoue franchement."""
-    if AXIsProcessTrustedWithOptions({kAXTrustedCheckOptionPrompt: True}):
+    if prompt_accessibility():
         return
     raise RuntimeError(
         "Permission Accessibilité refusée.\n"

@@ -41,8 +41,9 @@ from AppKit import (
     NSWindowStyleMaskClosable,
     NSWindowStyleMaskMiniaturizable,
     NSWindowStyleMaskTitled,
+    NSWorkspace,
 )
-from Foundation import NSObject, NSTimer
+from Foundation import NSObject, NSTimer, NSURL
 from PyObjCTools import AppHelper
 
 import client
@@ -60,6 +61,10 @@ COUNTDOWN = 8
 PAYMENT_TIMEOUT = 600
 REFRESH_EVERY = 30
 LOGO = Path(__file__).parent / "assets" / "temps-decran-logo.png"
+ACCESSIBILITY_PANE = (
+    "x-apple.systempreferences:com.apple.preference.security"
+    "?Privacy_Accessibility"
+)
 
 # Hauteur portée de 330 à 410 pour loger le curseur de prix : HEAD_Y, SUB_TOP,
 # SEP_Y et BODY_TOP se déduisent de H alors que ROW1_Y/ROW2_Y se comptent
@@ -290,6 +295,21 @@ class App(NSObject):
             sub = f"Serveur injoignable ({client.server_url()})"
             primary = "Réessayer"
             status = "Hors ligne"
+        elif self.lock is None and not typer.has_accessibility():
+            # Le verrou s'appuie sur la frappe automatique du code : sans la
+            # permission Accessibilité, poser un verrou créerait un code que
+            # l'app ne pourrait pas saisir. On bloque en amont plutôt que
+            # d'échouer après le compte à rebours, verrou déjà créé. Un verrou
+            # déjà actif n'est pas concerné : le révéler affiche le code, sans
+            # frappe, donc ce garde-fou ne vaut que pour la création.
+            head = "Accessibilité requise"
+            sub = "Autorise l'app à saisir le code à ta place."
+            body = (
+                "Réglages Système → Confidentialité et sécurité → "
+                "Accessibilité, puis active « Temps d'écran »."
+            )
+            primary = "Ouvrir les réglages"
+            status = "Accessibilité requise"
         elif self.lock is None:
             head = "Aucun verrou"
             sub = "Choisis une durée, et ce que craquer avant te coûtera."
@@ -426,10 +446,22 @@ class App(NSObject):
         elif self.offline:
             self.notice = ""
             self.refresh()
+        elif self.lock is None and not typer.has_accessibility():
+            self.request_accessibility()
         elif self.lock is None:
             self.create_lock()
         else:
             self.reveal(self.lock["lock_id"])
+
+    @objc.python_method
+    def request_accessibility(self) -> None:
+        # L'invite système (une fois par lancement) plus l'ouverture directe du
+        # volet, pour l'utilisateur qui l'a déjà fermée. Le rendu tourne chaque
+        # seconde en veille : dès la permission accordée, l'écran de création
+        # revient tout seul, sans relancer l'app.
+        typer.prompt_accessibility()
+        url = NSURL.URLWithString_(ACCESSIBILITY_PANE)
+        NSWorkspace.sharedWorkspace().openURL_(url)
 
     @objc.python_method
     def _secondary(self) -> None:
