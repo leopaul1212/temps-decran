@@ -2,9 +2,16 @@
 
     .venv/bin/python setup.py py2app
 
-Le bundle n'est pas signé : macOS affichera un avertissement Gatekeeper au
-premier lancement, et la permission Accessibilité devra être re-accordée à
-chaque nouvelle version, l'empreinte du binaire changeant à chaque build.
+py2app produit un exécutable nommé d'après CFBundleName (« Temps d'écran »).
+codesign ne sait pas sceller un bundle dont l'exécutable porte apostrophe et
+accent : c'est install.sh qui, après le build, renomme l'exécutable en ASCII
+et scelle le bundle par une signature ad-hoc valide — sans quoi TCC refuse la
+permission Accessibilité (voir le commentaire dédié dans install.sh). Un build
+lancé à la main par cette commande doit donc reproduire ces deux étapes.
+
+Signature ad-hoc : pas de Team ID, donc l'empreinte change à chaque build et la
+permission Accessibilité est à re-accorder après chaque mise à jour. Une vraie
+identité de signature (même auto-signée) lèverait cette contrainte.
 """
 
 import os
@@ -33,6 +40,7 @@ setup(
             "iconfile": "assets/icon.icns",
             "plist": {
                 "CFBundleName": "Temps d'écran",
+                "CFBundleDisplayName": "Temps d'écran",
                 "CFBundleIdentifier": "com.leopaul.temps-decran",
                 "CFBundleShortVersionString": "0.1.0",
                 "NSHumanReadableCopyright": "MIT",
