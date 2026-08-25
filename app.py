@@ -17,6 +17,7 @@ from pathlib import Path
 
 import objc
 from AppKit import (
+    NSAlert,
     NSApplication,
     NSApplicationActivationPolicyRegular,
     NSBackingStoreBuffered,
@@ -31,6 +32,8 @@ from AppKit import (
     NSMakeSize,
     NSMenu,
     NSMenuItem,
+    NSPasteboard,
+    NSPasteboardTypeString,
     NSPopUpButton,
     NSSlider,
     NSStatusBar,
@@ -244,7 +247,11 @@ class App(NSObject):
         self.status_icon.setTemplate_(False)
         self.status.button().setImage_(self.status_icon)
         menu = NSMenu.alloc().init()
-        for title, sel in (("Ouvrir la fenêtre", b"show:"), ("Quitter", b"terminate:")):
+        for title, sel in (
+            ("Ouvrir la fenêtre", b"show:"),
+            ("Copier mon jeton de récupération…", b"copyToken:"),
+            ("Quitter", b"terminate:"),
+        ):
             item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(title, sel, "")
             item.setTarget_(self if sel != b"terminate:" else NSApplication.sharedApplication())
             menu.addItem_(item)
@@ -603,6 +610,26 @@ class App(NSObject):
     def show_(self, sender) -> None:
         NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
         self.window.makeKeyAndOrderFront_(None)
+
+    def copyToken_(self, sender) -> None:
+        # Le jeton identifie l'appareil auprès du serveur ; il ne déverrouille
+        # rien. Le noter permet de retrouver et payer son code sur le site même
+        # après désinstallation — sans jeton, le verrou devient injoignable.
+        token = client.device_token()
+        pb = NSPasteboard.generalPasteboard()
+        pb.clearContents()
+        pb.setString_forType_(token, NSPasteboardTypeString)
+        alert = NSAlert.alloc().init()
+        alert.setMessageText_("Jeton de récupération copié")
+        alert.setInformativeText_(
+            "Colle-le en lieu sûr, dans tes notes ou un mot de passe, "
+            "AVANT de désinstaller l'app.\n\n"
+            "Avec ce jeton tu pourras retrouver et débloquer ton code sur "
+            "screentime.mahwai.app/recover, même sans l'app installée. "
+            "Sans lui, un verrou en cours devient irrécupérable.\n\n"
+            + token
+        )
+        alert.runModal()
 
     def windowShouldClose_(self, sender) -> bool:
         # La fenêtre se referme, l'app continue : le décompte doit rester
