@@ -49,14 +49,26 @@ build() { "$@" >>"$log" 2>&1 || die "Échec de la construction. Journal : $log";
 build "$PY" -m venv .venv-build
 build .venv-build/bin/pip install --quiet --upgrade pip
 build .venv-build/bin/pip install --quiet -r requirements.txt py2app
-TEMPS_DECRAN_SERVER="$SERVER" build .venv-build/bin/python setup.py py2app
+
+# Identité de signature stable, locale à cette machine : sans elle la signature
+# serait ad-hoc, l'empreinte changerait à chaque build, et l'accès Accessibilité
+# (lié par TCC) serait à re-accorder après chaque mise à jour. Le script est
+# idempotent : création au premier passage, réutilisation ensuite. Sa progression
+# s'affiche ici ; il n'imprime que « <empreinte> <trousseau> » sur stdout.
+read -r SIGN_IDENTITY SIGN_KEYCHAIN < <(bash ensure-signing-identity.sh) || true
+[ -n "${SIGN_IDENTITY:-}" ] || die "Préparation de l'identité de signature impossible."
+
+TEMPS_DECRAN_SERVER="$SERVER" \
+TEMPS_DECRAN_SIGN_IDENTITY="$SIGN_IDENTITY" \
+TEMPS_DECRAN_SIGN_KEYCHAIN="$SIGN_KEYCHAIN" \
+  build .venv-build/bin/python setup.py py2app
 
 [ -d "dist/$APP_NAME" ] || die "La construction n'a pas produit dist/$APP_NAME (journal : $log)."
 
 # Le bundle sort déjà signé : setup.py étend la commande py2app pour renommer
 # l'exécutable en ASCII (sans quoi codesign ne scelle pas un nom accentué, et
-# TCC refuse l'Accessibilité) puis apposer une signature ad-hoc valide. Rien à
-# faire de plus ici que de vérifier le résultat.
+# TCC refuse l'Accessibilité) puis le signer avec l'identité stable ci-dessus.
+# Rien à faire de plus ici que de vérifier le résultat.
 build codesign --verify "dist/$APP_NAME"
 
 dest="$HOME/Applications"
@@ -66,4 +78,5 @@ cp -R "dist/$APP_NAME" "$dest/"
 
 say "Installé dans $dest/$APP_NAME"
 say "macOS demandera l'accès Accessibilité au premier essai de frappe : Réglages Système → Confidentialité et sécurité → Accessibilité."
+say "Une fois accordé, l'accès tient : grâce à l'identité de signature stable, les mises à jour n'obligent plus à le re-accorder (une seule fois de plus si tu migres depuis une version ad-hoc antérieure)."
 open "$dest/$APP_NAME"

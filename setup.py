@@ -11,11 +11,17 @@ sceller le bundle par une signature ad-hoc valide. Tout build — cette commande
 lancée à la main comme install.sh — produit ainsi un bundle correct, sans étape
 manuelle à reproduire.
 
-Signature ad-hoc : pas de Team ID, donc l'empreinte change à chaque build et la
-permission Accessibilité est à re-accorder après chaque mise à jour. Une vraie
-identité de signature (même auto-signée) lèverait cette contrainte.
+Signature : si TEMPS_DECRAN_SIGN_IDENTITY est fourni (empreinte SHA-1 d'un
+certificat « Code Signing », cf. ensure-signing-identity.sh), le bundle est signé
+avec cette identité — sa Designated Requirement devient stable
+(« identifier … and certificate leaf = H"…" »), donc la permission Accessibilité
+liée par TCC survit aux reconstructions. À défaut, on retombe sur une signature
+ad-hoc (--sign -) : valide mais sans identité stable, l'empreinte (cdhash) change
+à chaque build, et l'accès Accessibilité est alors à re-accorder après chaque
+mise à jour.
 """
 
+import contextlib
 import os
 import subprocess
 from pathlib import Path
@@ -36,6 +42,31 @@ except ImportError:
     _py2app_command = None
 
 
+def _user_keychains() -> list[str]:
+    out = subprocess.check_output(["security", "list-keychains", "-d", "user"], text=True)
+    return [line.strip().strip('"') for line in out.splitlines() if line.strip()]
+
+
+@contextlib.contextmanager
+def _keychain_in_search_list(keychain: str):
+    """Ajoute temporairement le trousseau à la liste de recherche utilisateur.
+
+    codesign ne trouve une identité que via cette liste (le seul --keychain ne
+    suffit pas). On restaure l'état d'origine même si la signature échoue, pour ne
+    pas laisser le trousseau de la machine pollué.
+    """
+    original = _user_keychains()
+    if not keychain or keychain in original:
+        yield
+        return
+    subprocess.check_call(["security", "list-keychains", "-d", "user",
+                           "-s", keychain, *original])
+    try:
+        yield
+    finally:
+        subprocess.check_call(["security", "list-keychains", "-d", "user", "-s", *original])
+
+
 def _normalize_and_sign(app_path: Path) -> None:
     plist = app_path / "Contents" / "Info.plist"
     macos = app_path / "Contents" / "MacOS"
@@ -49,9 +80,23 @@ def _normalize_and_sign(app_path: Path) -> None:
             ["/usr/libexec/PlistBuddy",
              "-c", f"Set :CFBundleExecutable {APP_EXECUTABLE}", str(plist)]
         )
+
+    identity = os.environ.get("TEMPS_DECRAN_SIGN_IDENTITY", "").strip()
+    keychain = os.environ.get("TEMPS_DECRAN_SIGN_KEYCHAIN", "").strip()
     # --deep : l'exécutable secondaire python et les dylibs embarqués doivent
-    # être signés avant le sceau du bundle. --sign - : ad-hoc, sans identité.
-    subprocess.check_call(["codesign", "--force", "--deep", "--sign", "-", str(app_path)])
+    # être signés avant le sceau du bundle.
+    sign = ["codesign", "--force", "--deep"]
+    if identity:
+        # Identité stable (certificat auto-signé) → Designated Requirement stable
+        # → la permission Accessibilité (TCC) survit aux reconstructions.
+        sign += ["--sign", identity]
+        if keychain:
+            sign += ["--keychain", keychain]
+        with _keychain_in_search_list(keychain):
+            subprocess.check_call([*sign, str(app_path)])
+    else:
+        # Ad-hoc : valide mais sans identité stable (cdhash mouvant).
+        subprocess.check_call([*sign, "--sign", "-", str(app_path)])
     subprocess.check_call(["codesign", "--verify", str(app_path)])
 
 
